@@ -1,28 +1,32 @@
 import pytest
-from src.main import StockTrackerApp
+from src.main import StockShortsTracker
 import pandas as pd
 import os
+import tkinter as tk
 
 @pytest.fixture
 def app():
-    return StockTrackerApp()
+    root = tk.Tk()
+    app = StockShortsTracker(root)
+    yield app
+    root.destroy()
 
 def test_app_initialization(app):
     assert app is not None
     assert hasattr(app, 'scraper')
-    assert hasattr(app, 'update_data')
+    assert hasattr(app, 'scan_now')
 
-def test_update_data(app):
+def test_scan_now(app):
     # Test data update
-    app.update_data()
+    app.scan_now()
     
     # Verify files exist
-    assert os.path.exists('data/top_shorted_stocks.csv')
-    assert os.path.exists('data/stock_details.csv')
+    assert os.path.exists('top_shorted_stocks.csv')
+    assert os.path.exists('stock_details.csv')
     
     # Verify data format
-    stocks_df = pd.read_csv('data/top_shorted_stocks.csv')
-    details_df = pd.read_csv('data/stock_details.csv')
+    stocks_df = pd.read_csv('top_shorted_stocks.csv')
+    details_df = pd.read_csv('stock_details.csv')
     
     assert len(stocks_df) > 0
     assert len(details_df) > 0
@@ -38,11 +42,11 @@ def test_update_data(app):
 
 def test_data_consistency(app):
     # Update data
-    app.update_data()
+    app.scan_now()
     
     # Read both files
-    stocks_df = pd.read_csv('data/top_shorted_stocks.csv')
-    details_df = pd.read_csv('data/stock_details.csv')
+    stocks_df = pd.read_csv('top_shorted_stocks.csv')
+    details_df = pd.read_csv('stock_details.csv')
     
     # Verify that all stocks in top_shorted_stocks.csv have corresponding entries in stock_details.csv
     stock_tickers = set(stocks_df['ticker'])

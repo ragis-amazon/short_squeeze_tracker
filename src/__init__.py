@@ -1,0 +1,3 @@
+"""
+Stock Shorts Tracker package.
+""" 
