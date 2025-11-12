@@ -13,9 +13,14 @@ import requests
 import zipfile
 import io
 import platform
+import re
+from dotenv import load_dotenv
 
 class FinvizScraper:
     def __init__(self):
+        load_dotenv()
+        self.username = os.getenv("FINVIZ_USERNAME")
+        self.password = os.getenv("FINVIZ_PASSWORD")
         self.setup_driver()
         
     def download_chromedriver(self):
@@ -42,11 +47,17 @@ class FinvizScraper:
     def setup_driver(self):
         try:
             chrome_options = Options()
-            chrome_options.add_argument("--headless=new")
+            # chrome_options.add_argument("--headless=new")  # Disable headless for debugging
             chrome_options.add_argument("--no-sandbox")
             chrome_options.add_argument("--disable-dev-shm-usage")
             chrome_options.add_argument("--disable-gpu")
             chrome_options.add_argument("--window-size=1920,1080")
+            chrome_options.add_argument("--disable-blink-features=AutomationControlled")
+            chrome_options.add_argument("--disable-extensions")
+            chrome_options.add_argument("--disable-notifications")
+            chrome_options.add_argument("--disable-popup-blocking")
+            chrome_options.add_argument("--start-maximized")
+            chrome_options.add_argument("--user-agent=Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
             
             # Try to find Chrome in common macOS locations
             chrome_paths = [
@@ -70,47 +81,161 @@ class FinvizScraper:
             service = Service(executable_path=driver_path)
             self.driver = webdriver.Chrome(service=service, options=chrome_options)
             
+            # Set page load timeout
+            self.driver.set_page_load_timeout(30)
+            
         except Exception as e:
             error_msg = f"Failed to initialize Chrome WebDriver: {str(e)}\n"
             error_msg += "Please make sure Chrome is installed on your system.\n"
             error_msg += "You can download Chrome from: https://www.google.com/chrome/"
             raise Exception(error_msg)
         
-    def get_top_shorted_stocks(self):
-        """Get top 20 most shorted stocks from Finviz"""
+    def close_all_ads(self, max_attempts=10):
+        """Try to close all visible ads/popups on the page."""
+        close_selectors = [
+            (By.CLASS_NAME, "modal_close"),
+            (By.CLASS_NAME, "close"),
+            (By.XPATH, "//div[contains(@class, 'modal')]//span[text()='×']"),
+            (By.XPATH, "//div[contains(@class, 'modal')]//button[text()='Close']"),
+            (By.XPATH, "//span[text()='×']"),
+            (By.XPATH, "//button[text()='Close']"),
+            (By.XPATH, "//div[contains(@id, 'ad_') or contains(@class, 'ad_')]//span[text()='×']"),
+            (By.XPATH, "//div[contains(@id, 'ad_') or contains(@class, 'ad_')]//button[text()='Close']"),
+            (By.XPATH, "//iframe[contains(@id, 'ad') or contains(@name, 'ad') or contains(@src, 'ad')]")
+        ]
+        for attempt in range(max_attempts):
+            ad_closed = False
+            for selector_type, selector_value in close_selectors:
+                try:
+                    close_btns = self.driver.find_elements(selector_type, selector_value)
+                    for btn in close_btns:
+                        if btn.is_displayed() and btn.is_enabled():
+                            print(f"Attempt {attempt+1}: Closing ad/modal with selector: {selector_value}")
+                            btn.click()
+                            time.sleep(2)
+                            ad_closed = True
+                except Exception:
+                    continue
+            # Take a screenshot after each attempt
+            self.driver.save_screenshot(f"finviz_debug_ads_attempt_{attempt+1}.png")
+            print(f"Saved screenshot as finviz_debug_ads_attempt_{attempt+1}.png")
+            if not ad_closed:
+                break
+            time.sleep(2)
+
+    def is_valid_ticker(self, ticker):
+        """Return True if ticker looks like a valid stock symbol."""
+        return bool(re.match(r'^[A-Z0-9.-]{1,10}$', ticker))
+
+    def login(self):
+        self.driver.get("https://finviz.com/login.ashx")
+        time.sleep(2)
+        self.driver.find_element(By.NAME, "email").send_keys(self.username)
+        self.driver.find_element(By.NAME, "password").send_keys(self.password)
+        self.driver.find_element(By.XPATH, "//input[@type='submit']").click()
+        time.sleep(3)
+        print("Logged in to Finviz")
+
+    def get_top_shorted_stocks(self, num_stocks=20):
+        """Get top most shorted stocks from Finviz (fetches visible rows, paginates if needed)"""
+        self.login()
         try:
             self.driver.get("https://finviz.com/screener.ashx?v=152&o=-shortinterestshare")
-            time.sleep(2)  # Wait for page to load
-            
-            # Wait for the table to be present
-            table = WebDriverWait(self.driver, 10).until(
-                EC.presence_of_element_located((By.CLASS_NAME, "table-light"))
-            )
-            
-            # Get all rows except header
-            rows = table.find_elements(By.TAG_NAME, "tr")[1:21]  # Get first 20 rows
-            
+            time.sleep(10)  # Increased wait time for page load
+            print(f"Current URL: {self.driver.current_url}")
+
+            # Close all ads/popups
+            self.close_all_ads(max_attempts=10)
+
+            # Find all tables, look for the one with the correct header
+            tables = self.driver.find_elements(By.TAG_NAME, "table")
+            target_table = None
+            header_row = None
+            header_map = {}
+            for table in tables:
+                header_candidates = table.find_elements(By.TAG_NAME, "tr")
+                for row in header_candidates:
+                    headers = [th.text.strip() for th in row.find_elements(By.TAG_NAME, "td") + row.find_elements(By.TAG_NAME, "th")]
+                    lower_headers = [h.lower() for h in headers]
+                    if 'ticker' in lower_headers and 'company' in lower_headers and 'short float' in lower_headers:
+                        target_table = table
+                        header_row = row
+                        header_map = {h.lower(): i for i, h in enumerate(headers)}
+                        break
+                if target_table:
+                    break
+            if not target_table or not header_row or not header_map:
+                print("Could not find the stock table or header!")
+                self.driver.save_screenshot("finviz_debug.png")
+                print("Saved screenshot as finviz_debug.png")
+                print("Page source preview:", self.driver.page_source[:2000])
+                return []
+
+            # Scroll header into view
+            self.driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", header_row)
+            time.sleep(2)
+            self.driver.save_screenshot("finviz_debug.png")
+            print("Scrolled to header and saved screenshot as finviz_debug.png")
+
+            # Define which fields to extract and their header names
+            field_map = {
+                'ticker': 'ticker',
+                'company': 'company',
+                'sector': 'sector',
+                'industry': 'industry',
+                'country': 'country',
+                'market_cap': 'market cap.',
+                'pe': 'p/e',
+                'short_float': 'short float',
+                'short_ratio': 'short ratio',  # Days to cover
+                'short_interest': 'short interest',
+                'volume': 'volume',
+                'price': 'price',
+                'change': 'change'
+            }
+
             stocks = []
-            for row in rows:
-                cols = row.find_elements(By.TAG_NAME, "td")
-                if len(cols) >= 2:
-                    ticker = cols[1].text
-                    company = cols[2].text
-                    sector = cols[3].text
-                    industry = cols[4].text
-                    short_interest = cols[6].text
-                    stocks.append({
-                        'ticker': ticker,
-                        'company': company,
-                        'sector': sector,
-                        'industry': industry,
-                        'short_interest': short_interest
-                    })
-            
-            return stocks
-            
+            page = 1
+            while len(stocks) < num_stocks:
+                rows = target_table.find_elements(By.TAG_NAME, "tr")[1:]  # skip header
+                print(f"Page {page}: Found {len(rows)} stock rows")
+                for row in rows:
+                    cols = row.find_elements(By.TAG_NAME, "td")
+                    if len(cols) < len(header_map):
+                        continue
+                    ticker = cols[header_map.get(field_map['ticker'], -1)].text.strip()
+                    if not self.is_valid_ticker(ticker):
+                        continue
+                    stock = {}
+                    for key, header in field_map.items():
+                        idx = header_map.get(header.lower(), -1)
+                        stock[key] = cols[idx].text.strip() if idx != -1 else ''
+                    stocks.append(stock)
+                    if len(stocks) >= num_stocks:
+                        break
+                if len(stocks) >= num_stocks:
+                    break
+                # Try to click next page if available
+                try:
+                    next_btn = self.driver.find_element(By.XPATH, "//a[contains(text(),'next') or contains(text(),'Next')]")
+                    if next_btn.is_enabled():
+                        print("Clicking next page...")
+                        next_btn.click()
+                        time.sleep(3)
+                        page += 1
+                    else:
+                        print("Next button not enabled, stopping.")
+                        break
+                except Exception as e:
+                    print(f"No next button found or error clicking next: {str(e)}")
+                    break
+            print(f"Successfully processed {len(stocks)} stocks")
+            return stocks[:num_stocks]
         except Exception as e:
             print(f"Error getting top shorted stocks: {str(e)}")
+            self.driver.save_screenshot("finviz_debug.png")
+            print("Saved screenshot as finviz_debug.png")
+            print("Page source preview:", self.driver.page_source[:2000])
             return []
             
     def get_stock_details(self, ticker):

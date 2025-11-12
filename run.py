@@ -3,7 +3,6 @@ import sys
 from src.main import StockShortsTracker
 import tkinter as tk
 import argparse
-from src.main import StockTrackerApp
 
 def main():
     parser = argparse.ArgumentParser(description='Stock Shorts Tracker')
@@ -12,11 +11,13 @@ def main():
     args = parser.parse_args()
 
     if args.update_only:
-        app = StockTrackerApp()
-        app.update_data()
+        app = StockShortsTracker(tk.Tk())
+        app.scan_now()
     else:
-        app = StockTrackerApp()
-        app.run()
+        root = tk.Tk()
+        app = StockShortsTracker(root)
+        root.protocol("WM_DELETE_WINDOW", app.on_closing)
+        root.mainloop()
 
 if __name__ == "__main__":
     main() 
